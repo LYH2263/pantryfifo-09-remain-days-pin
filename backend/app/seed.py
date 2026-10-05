@@ -6,11 +6,19 @@ def init_db():
     CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, name TEXT, layer TEXT, unit TEXT);
     CREATE TABLE IF NOT EXISTS lots(
       id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INT, qty_in REAL, qty_remain REAL,
-      expiry TEXT, status TEXT, data_quality TEXT
+      expiry TEXT, status TEXT, data_quality TEXT,
+      override_days INTEGER, override_set_at TEXT
     );
     CREATE TABLE IF NOT EXISTS consumptions(id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT, result_json TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
+    # 旧库迁移：补手钉可放天数列
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(lots)")}
+    if "override_days" not in cols:
+        c.execute("ALTER TABLE lots ADD COLUMN override_days INTEGER")
+    if "override_set_at" not in cols:
+        c.execute("ALTER TABLE lots ADD COLUMN override_set_at TEXT")
+    c.commit()
     if c.execute("SELECT COUNT(*) c FROM items").fetchone()["c"] == 0:
         c.executemany("INSERT INTO items(name,layer,unit) VALUES (?,?,?)", [
             ("牛奶", "upper", "盒"), ("鸡蛋", "mid", "个"), ("冻饺", "lower", "袋"),

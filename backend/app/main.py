@@ -2,13 +2,22 @@ import json
 from datetime import date, datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from app import seed
-from app.db import connect
+from app.db import connect, write_tx
 from app.engines.fefo import consume_fefo, expire_lots
+from app.modules.override_days import (
+    OverrideError, alert_rows, lot_detail, pin_override,
+)
 
 app = FastAPI(title="Pantryfifo", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+_OVERRIDE_STATUS = {
+    "lot_not_found": 404,
+    "not_on_shelf": 409,
+    "override_days_non_positive": 400,
+}
 
 @app.on_event("startup")
 def _startup(): seed.init_db()
@@ -33,23 +42,34 @@ def fridge(layer: str | None = None):
 @app.get("/api/alerts")
 def alerts():
     c = connect()
-    warn = int(c.execute("SELECT value FROM settings WHERE key='warn_days'").fetchone()["value"])
-    today = date.today().isoformat()
-    rows = [dict(r) for r in c.execute(
-        """SELECT lots.*, items.name, items.layer FROM lots JOIN items ON items.id=lots.item_id
-           WHERE status='on_shelf' AND qty_remain>0 AND expiry IS NOT NULL""")]
-    c.close()
-    out = []
-    for r in rows:
-        if r["expiry"] <= today:
-            r["level"] = "expired"
-            out.append(r)
-        else:
-            # simple day diff via fromisoformat
-            delta = (date.fromisoformat(r["expiry"]) - date.today()).days
-            if delta <= warn:
-                r["level"] = "soon"; r["days_left"] = delta; out.append(r)
-    return out
+    try:
+        return alert_rows(c)
+    finally:
+        c.close()
+
+@app.get("/api/lots/{lot_id}")
+def get_lot(lot_id: int):
+    c = connect()
+    try:
+        d = lot_detail(c, lot_id)
+        if d is None:
+            raise HTTPException(404, "lot_not_found")
+        return d
+    finally:
+        c.close()
+
+class OverrideIn(BaseModel):
+    override_days: StrictInt | None  # 正整数钉值；null 清除
+
+@app.post("/api/lots/{lot_id}/override")
+def set_override(lot_id: int, body: OverrideIn):
+    c = connect()
+    try:
+        return pin_override(c, lot_id, body.override_days)
+    except OverrideError as e:
+        raise HTTPException(_OVERRIDE_STATUS.get(e.reason, 400), e.reason)
+    finally:
+        c.close()
 
 class LotIn(BaseModel):
     item_id: int
@@ -74,31 +94,57 @@ class ConsumeIn(BaseModel):
 @app.post("/api/consume")
 def consume(body: ConsumeIn):
     c = connect()
-    lots = [dict(r) for r in c.execute(
-        "SELECT * FROM lots WHERE item_id=? AND status='on_shelf' AND qty_remain>0", (body.item_id,))]
-    result = consume_fefo(lots, body.qty)
-    if not result["ok"] and result["reason"] == "qty_non_positive":
-        c.close(); raise HTTPException(400, result["reason"])
-    if not result["ok"]:
-        c.close(); raise HTTPException(409, result)
-    for d in result["deductions"]:
-        c.execute("UPDATE lots SET qty_remain = qty_remain - ? WHERE id=?", (d["take"], d["lot_id"]))
-        rem = c.execute("SELECT qty_remain FROM lots WHERE id=?", (d["lot_id"],)).fetchone()["qty_remain"]
-        if rem <= 0:
-            c.execute("UPDATE lots SET status='consumed', qty_remain=0 WHERE id=?", (d["lot_id"],))
-    c.execute("INSERT INTO consumptions(note,result_json,created_at) VALUES (?,?,?)",
-              (body.note, json.dumps(result), datetime.now(timezone.utc).isoformat()))
-    c.commit(); c.close(); return result
+    try:
+        with write_tx(c):
+            lots = [dict(r) for r in c.execute(
+                "SELECT * FROM lots WHERE item_id=? AND status='on_shelf' AND qty_remain>0", (body.item_id,))]
+            result = consume_fefo(lots, body.qty)
+            if not result["ok"] and result["reason"] == "qty_non_positive":
+                raise HTTPException(400, result["reason"])
+            if not result["ok"]:
+                raise HTTPException(409, result)
+            for d in result["deductions"]:
+                c.execute("UPDATE lots SET qty_remain = qty_remain - ? WHERE id=?", (d["take"], d["lot_id"]))
+                rem = c.execute("SELECT qty_remain FROM lots WHERE id=?", (d["lot_id"],)).fetchone()["qty_remain"]
+                if rem <= 0:
+                    c.execute("UPDATE lots SET status='consumed', qty_remain=0 WHERE id=?", (d["lot_id"],))
+            c.execute("INSERT INTO consumptions(note,result_json,created_at) VALUES (?,?,?)",
+                      (body.note, json.dumps(result), datetime.now(timezone.utc).isoformat()))
+        return result
+    finally:
+        c.close()
 
 @app.post("/api/expire-sweep")
 def expire_sweep():
     c = connect()
-    lots = [dict(r) for r in c.execute("SELECT * FROM lots WHERE status='on_shelf'")]
-    ids = expire_lots(lots, date.today().isoformat())
-    for i in ids:
-        c.execute("UPDATE lots SET status='expired' WHERE id=?", (i,))
-    c.commit(); c.close(); return {"expired_ids": ids}
+    try:
+        with write_tx(c):
+            lots = [dict(r) for r in c.execute("SELECT * FROM lots WHERE status='on_shelf'")]
+            ids = expire_lots(lots, date.today().isoformat())
+            for i in ids:
+                c.execute("UPDATE lots SET status='expired' WHERE id=?", (i,))
+        return {"expired_ids": ids}
+    finally:
+        c.close()
 
 @app.get("/api/settings")
 def settings():
     c = connect(); rows = {r["key"]: r["value"] for r in c.execute("SELECT * FROM settings")}; c.close(); return rows
+
+class SettingsIn(BaseModel):
+    warn_days: StrictInt
+
+@app.post("/api/settings")
+def update_settings(body: SettingsIn):
+    if body.warn_days < 0:
+        raise HTTPException(400, "warn_days_negative")
+    c = connect()
+    try:
+        with write_tx(c):
+            c.execute(
+                "INSERT INTO settings(key,value) VALUES ('warn_days',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(body.warn_days),))
+    finally:
+        c.close()
+    return {"warn_days": str(body.warn_days)}

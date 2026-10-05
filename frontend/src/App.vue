@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="alert-bar" v-if="alerts.length">临期预警：{{ alerts.map(a => a.name + '(' + a.level + ')').join(' · ') }}</div>
+    <div class="alert-bar" v-if="alerts.length">临期预警：{{ alerts.map(alertText).join(' · ') }}</div>
     <div class="alert-bar" v-else>临期预警带：暂无紧急批次</div>
     <div class="wrap">
       <nav class="layer-tabs">
@@ -17,8 +17,7 @@
   </div>
 </template>
 <script setup>
-import { ref, onMounted } from 'vue'
-import { api } from './api'
-const alerts = ref([])
-onMounted(async () => { try { alerts.value = await api('/alerts') } catch { alerts.value = [] } })
+import { onMounted } from 'vue'
+import { alerts, alertText, refreshAlerts } from './alerts'
+onMounted(refreshAlerts)
 </script>

@@ -1,9 +1,10 @@
-"""FEFO consume: earliest expiry first among positive remaining lots."""
+"""FEFO consume: earliest effective expiry first among positive remaining lots."""
+from app.modules.override_days import effective_expiry
 
 def sort_lots_fefo(lots: list[dict]) -> list[dict]:
     return sorted(
         [l for l in lots if float(l.get("qty_remain", 0)) > 0],
-        key=lambda l: (l.get("expiry") or "9999-99-99", l.get("id") or 0),
+        key=lambda l: (effective_expiry(l) or "9999-99-99", l.get("id") or 0),
     )
 
 def consume_fefo(lots: list[dict], qty: float) -> dict:
@@ -25,10 +26,13 @@ def consume_fefo(lots: list[dict], qty: float) -> dict:
     return {"ok": True, "reason": "", "deductions": deductions, "short": 0.0}
 
 def expire_lots(lots: list[dict], today: str) -> list[int]:
-    """Ids that should leave shelf: remaining>0 and expiry < today."""
+    """Ids that should leave shelf: remaining>0 and effective expiry < today.
+
+    与顶条 expired 同一条规则（override_days 模块）：已钉批按生效到期日判断。
+    """
     out = []
     for l in lots:
-        exp = l.get("expiry")
-        if exp and exp < today and float(l.get("qty_remain", 0)) > 0:
+        eff = effective_expiry(l)
+        if eff and eff < today and float(l.get("qty_remain", 0)) > 0:
             out.append(l["id"])
     return out
