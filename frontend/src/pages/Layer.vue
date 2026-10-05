@@ -1,7 +1,9 @@
 <template>
   <div>
     <h1>{{ props.layer }} 层</h1>
-    <span v-for="x in rows" :key="x.id" class="lot">{{ x.name }} ×{{ x.qty_remain }} · {{ x.expiry }}</span>
+    <router-link v-for="x in rows" :key="x.id" class="lot" :to="'/lots/' + x.id">
+      {{ x.name }} ×{{ x.qty_remain }} · {{ x.expiry }}<span v-if="x.override_days != null" class="pin">钉{{ x.override_days }}天</span>
+    </router-link>
   </div>
 </template>
 <script setup>

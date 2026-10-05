@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div class="alert-bar" v-if="alerts.length">临期预警：{{ alerts.map(a => a.name + '(' + a.level + ')').join(' · ') }}</div>
+    <div class="alert-bar" v-if="alerts.length">临期预警：{{ alerts.map(a => a.name + (a.level === 'expired' ? '(已过期)' : '(剩' + a.days_left + '天)')).join(' · ') }}</div>
     <div class="alert-bar" v-else>临期预警带：暂无紧急批次</div>
     <div class="wrap">
       <nav class="layer-tabs">
@@ -17,8 +17,14 @@
   </div>
 </template>
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, provide, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from './api'
 const alerts = ref([])
-onMounted(async () => { try { alerts.value = await api('/alerts') } catch { alerts.value = [] } })
+async function load() { try { alerts.value = await api('/alerts') } catch { alerts.value = [] } }
+// 批次详情钉值/设置改 warn_days 后调用,顶条与详情对同一批得出同一紧急结论
+provide('refreshAlerts', load)
+const route = useRoute()
+watch(() => route.fullPath, load)
+onMounted(load)
 </script>
